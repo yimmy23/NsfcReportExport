@@ -1,6 +1,7 @@
 import { imageDimensionsFromData } from "image-dimensions";
 import { ImgResultType, ProjectInfo } from "./types";
 import { parseUpstreamJson, readImagePath } from "./report-check";
+import { classifyBusiness, diagnosePageJson } from "./response-diag";
 import {
     OfficialFetch,
     OfficialRetryError,
@@ -72,6 +73,13 @@ export const readProjectInfo = async (
     if (response.status !== 200) {
         throw new OfficialRetryError(`项目信息 HTTP ${response.status}`);
     }
+    const infoKind = classifyBusiness(data);
+    if (infoKind === "access" || infoKind === "unfinished") {
+        throw new OfficialStopError(
+            diagnosePageJson(response.status, response.contentType, data) ??
+                "官网业务信息要求停止。未生成PDF。",
+        );
+    }
     return {
         projectName: data?.data?.projectName ?? "projectName",
         projectAdmin: (data?.data?.projectAdmin ?? "") + " " +
@@ -114,12 +122,15 @@ export const readReportPage = async (
     } catch (error) {
         throw new OfficialRetryError((error as Error).message);
     }
-    let imagePath: string;
-    try {
-        imagePath = readImagePath(payload, listed.status);
-    } catch (error) {
-        throw new OfficialRetryError((error as Error).message);
+    const diagnosis = diagnosePageJson(
+        listed.status,
+        listed.contentType,
+        payload,
+    );
+    if (diagnosis) {
+        throw new OfficialStopError(diagnosis);
     }
+    const imagePath = readImagePath(payload, listed.status);
     const imageUrl = resolveOfficialUrl(imagePath);
 
     const probe = await fetchImpl({

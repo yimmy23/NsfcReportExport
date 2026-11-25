@@ -1,9 +1,9 @@
 {
     "update_url": "https://clients2.google.com/service/update2/crx",
     "manifest_version": 3,
-    "name": "国自然结题报告下载 直连",
-    "description": "只从已打开的官网结题详情页直连导出 PDF，不把页地址发给第三方。",
-    "version": "1.5.2",
+    "name": "国自然结题报告下载 直连诊断",
+    "description": "只从已打开的官网结题详情页直连导出 PDF。1.5.3 在业务 JSON 上给出脱敏诊断，不把页地址发给第三方。",
+    "version": "1.5.3",
     "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAgQp1Z5GQxf4GJUQJLDR3wiMfbIeLHTxUWMpRFYeOhuytSZNpJax7uVUIUDuEQuVj3GDnoEdQRL8s+sMCS4YWg2s23IVQxqXhSLjwXk7vjO+dpyLA/aH2SORkJ52T7Po6BpU/dMm/q1XPruDEa2JAF88v5bY+/BCPVcvU84VV5lgAdcMYuSSO/tpzFFSEUade9+aTyVsSeZ9kBYRNhmIbMduA1+A+cuMJN4dy/y+elT1Q+bZNi9RXv012VB0OAmL0uJgKiI+wAxGERml57W3zroltNV5kYxG1mWEy/2DwTpPXHJPQMVMJ4jca5j4qhB4zYD5C6yOqjKDwS/bbwZ9WkwIDAQAB",
     "icons": {
         "512": "images/logo.png"

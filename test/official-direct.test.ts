@@ -70,8 +70,8 @@ describe("只留在官网", () => {
 
     it("源码和清单不再包含第三方图片代理", () => {
         const manifest = readFileSync("extension/manifest.json", "utf8");
-        assert.match(manifest, /"version": "1.5.2"/);
-        assert.match(manifest, /国自然结题报告下载 直连/);
+        assert.match(manifest, /"version": "1.5.3"/);
+        assert.match(manifest, /国自然结题报告下载 直连诊断/);
         assert.doesNotMatch(manifest, /externally_connectable/);
         const bundle = [
             manifest,
@@ -178,7 +178,7 @@ describe("归档清单", () => {
             exportedAt: "2026-11-25T00:00:00.000Z",
         });
         assert.equal(manifest.thirdPartyImageProxy, false);
-        assert.equal(manifest.extensionVersion, "1.5.2");
+        assert.equal(manifest.extensionVersion, "1.5.3");
         assert.equal(manifest.pageCount, 1);
         assert.equal(manifest.pages[0].sha256, digest);
         assert.equal(manifestFilename("示例/报告"), "示例-报告.nsfc-export.json");

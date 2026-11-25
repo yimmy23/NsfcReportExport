@@ -2,7 +2,7 @@
  * 官网直连的纯判断：不发请求，不读 Cookie，不把地址交给其他主机。
  */
 
-export const EXTENSION_VERSION = "1.5.2";
+export const EXTENSION_VERSION = "1.5.3";
 export const OFFICIAL_ORIGIN = "https://kd.nsfc.cn";
 export const PAGE_INTERVAL_MS = 1500;
 
