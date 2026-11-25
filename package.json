@@ -1,6 +1,6 @@
 {
   "name": "NsfcReportExport",
-  "version": "1.5.0",
+  "version": "1.5.3",
   "author": {
     "name": "ejfkdev"
   },
@@ -8,7 +8,8 @@
   "scripts": {
     "reset": "npx rimraf ./**/node_modules",
     "prepare": "husky install",
-    "build": "NODE_ENV=production rspack build"
+    "build": "NODE_ENV=production rspack build",
+    "test": "tsx --test test/*.test.ts"
   },
   "engines": {
     "node": ">=16.18.1"
@@ -38,6 +39,7 @@
     "prettier": "~3.5.1",
     "rimraf": "~6.0.1",
     "ts-node": "^10.9.2",
+    "tsx": "^4.23.15",
     "typescript": "~5.7.3"
   }
 }
