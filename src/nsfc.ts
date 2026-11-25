@@ -1,5 +1,6 @@
 import { imageDimensionsFromData } from "image-dimensions";
 import { ImgResultType, ProjectInfo } from "./types";
+import { parseUpstreamJson, readImagePath } from "./report-check";
 import { fetchImageByProxyBatch, getCachedData, setCachedData } from "./utils";
 
 const host = "https://kd.nsfc.cn";
@@ -38,7 +39,7 @@ export const getImgURL = async (
         cached = true;
     } else {
         const signal = AbortSignal.timeout(15000);
-        const data = await fetch(
+        const response = await fetch(
             `${host}/api/baseQuery/completeProjectReport`,
             {
                 headers: {
@@ -50,8 +51,17 @@ export const getImgURL = async (
                 method: "POST",
                 signal,
             },
-        ).then((response) => response.json());
-        imgURL = host + data.data.url;
+        );
+        const body = await response.text();
+        const data = parseUpstreamJson(
+            response.status,
+            response.headers.get("content-type"),
+            body,
+        );
+        if (!response.ok) {
+            throw new Error(`上游响应异常 HTTP ${response.status}`);
+        }
+        imgURL = host + readImagePath(data, response.status);
     }
 
     if (!cached) {
@@ -91,21 +101,28 @@ export const getProjectInfo = async (id: string): Promise<ProjectInfo> => {
             mode: "cors",
         },
     );
-    if (response.ok) {
-        const data = await response.json();
-        return {
-            projectName: data?.data?.projectName ?? "projectName",
-            projectAdmin: (data?.data?.projectAdmin ?? "") + " " +
-                (data?.data?.dependUnit ?? ""),
-            conclusionAbstract: data?.data?.conclusionAbstract ?? "",
-            projectKeywordC: data?.data?.projectKeywordC ?? "",
+    const body = await response.text();
+    const data = parseUpstreamJson(
+        response.status,
+        response.headers.get("content-type"),
+        body,
+    ) as {
+        data?: {
+            projectName?: string;
+            projectAdmin?: string;
+            dependUnit?: string;
+            conclusionAbstract?: string;
+            projectKeywordC?: string;
         };
-    } else {
-        return {
-            projectName: "projectName",
-            projectAdmin: "",
-            conclusionAbstract: "",
-            projectKeywordC: "",
-        };
+    };
+    if (!response.ok) {
+        throw new Error(`项目信息请求失败 HTTP ${response.status}`);
     }
+    return {
+        projectName: data?.data?.projectName ?? "projectName",
+        projectAdmin: (data?.data?.projectAdmin ?? "") + " " +
+            (data?.data?.dependUnit ?? ""),
+        conclusionAbstract: data?.data?.conclusionAbstract ?? "",
+        projectKeywordC: data?.data?.projectKeywordC ?? "",
+    };
 };

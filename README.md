@@ -7,6 +7,8 @@ chrome商店地址：https://chromewebstore.google.com/detail/%E5%9B%BD%E8%87%AA
 
 离线安装：https://docs.qq.com/aio/DZHVYbHd5d2lQbnpq?p=KBqlBRg6rIfSwfgAKdjSiM
 
+fork 调查与本地构建说明（不含在线站后端）：[docs/调查与构建说明.md](docs/调查与构建说明.md)
+
 编译：
 
 ```bash
