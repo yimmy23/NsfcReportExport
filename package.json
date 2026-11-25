@@ -1,6 +1,6 @@
 {
   "name": "NsfcReportExport",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "author": {
     "name": "ejfkdev"
   },
@@ -9,7 +9,7 @@
     "reset": "npx rimraf ./**/node_modules",
     "prepare": "husky install",
     "build": "NODE_ENV=production rspack build",
-    "test": "tsx --test test/report-check.test.ts"
+    "test": "tsx --test test/*.test.ts"
   },
   "engines": {
     "node": ">=16.18.1"

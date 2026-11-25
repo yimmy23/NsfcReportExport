@@ -31,7 +31,7 @@ export const projectImg2pdf = (
         subject: info.conclusionAbstract,
         author: info.projectAdmin,
         keywords: info.projectKeywordC,
-        creator: "@ejfkdev",
+        creator: "NsfcReportExport/1.5.2 direct",
     });
 
     doc.deletePage(1);

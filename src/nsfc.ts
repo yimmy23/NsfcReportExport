@@ -1,112 +1,57 @@
 import { imageDimensionsFromData } from "image-dimensions";
 import { ImgResultType, ProjectInfo } from "./types";
 import { parseUpstreamJson, readImagePath } from "./report-check";
-import { fetchImageByProxyBatch, getCachedData, setCachedData } from "./utils";
+import {
+    OfficialFetch,
+    OfficialRetryError,
+    OfficialStopError,
+    accessStopMessage,
+    classifyImageProbe,
+    isAccessControl,
+    resolveOfficialUrl,
+} from "./official-page";
 
 const host = "https://kd.nsfc.cn";
 
-/**
- * 获取一页报告图片
- * @param id 报告id
- * @param index 第几页
- * @returns ImgResultType
- */
-export const getImgBlob = async (
-    imgURL: string,
-): Promise<ImgResultType> => {
-    // 获取图片内容
-    const imgArrayBuffer = await fetchImageByProxyBatch(imgURL);
-    // 从图片内容解析宽高
-    const size = imageDimensionsFromData(imgArrayBuffer);
-    return {
-        imageData: imgArrayBuffer,
-        width: size?.width,
-        height: size?.height,
-        // pdf竖版或横版页
-        orientation: (size?.width ?? 0) < (size?.height ?? 0) ? "p" : "l",
-    };
-};
-
-export const getImgURL = async (
-    id: string,
-    index: number,
-): Promise<[string, boolean]> => {
-    let imgURL = "";
-    const cacheData = await getCachedData(`img_${id}_${index}`);
-    let cached = false;
-    if (cacheData?.data) {
-        imgURL = cacheData.data;
-        cached = true;
-    } else {
-        const signal = AbortSignal.timeout(15000);
-        const response = await fetch(
-            `${host}/api/baseQuery/completeProjectReport`,
-            {
-                headers: {
-                    accept: "application/json, text/plain, */*",
-                    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                    "content-type": "application/x-www-form-urlencoded",
-                },
-                body: `id=${id}&index=${index}`,
-                method: "POST",
-                signal,
-            },
-        );
-        const body = await response.text();
-        const data = parseUpstreamJson(
-            response.status,
-            response.headers.get("content-type"),
-            body,
-        );
-        if (!response.ok) {
-            throw new Error(`上游响应异常 HTTP ${response.status}`);
-        }
-        imgURL = host + readImagePath(data, response.status);
-    }
-
-    if (!cached) {
-        const signal = AbortSignal.timeout(15000);
-        // 检查图片URL是否可访问
-        const response = await fetch(imgURL, {
-            method: "HEAD",
-            signal,
-        });
-        if (response.status === 404) {
-            return ["404", cached];
-        } else if (response.status !== 200) {
-            throw new Error(`${response.status} ${imgURL}`);
-        }
-    }
-    await setCachedData(`img_${id}_${index}`, imgURL, 60 * 60 * 24 * 7);
-    return [imgURL, cached];
-};
-
-/**
- * 获取报告名称等基础信息
- * @param id
- * @returns
- */
-export const getProjectInfo = async (id: string): Promise<ProjectInfo> => {
-    console.log("getProjectInfo", id);
-    const response = await fetch(
-        `${host}/api/baseQuery/conclusionProjectInfo/${id}`,
-        {
-            headers: {
-                accept: "application/json, text/plain, */*",
-                "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                "content-type": "application/x-www-form-urlencoded",
-            },
-            body: null,
-            method: "POST",
-            mode: "cors",
-        },
-    );
-    const body = await response.text();
-    const data = parseUpstreamJson(
-        response.status,
-        response.headers.get("content-type"),
+async function readOfficialText(
+    fetchImpl: OfficialFetch,
+    url: string,
+    method: "GET" | "POST" | "HEAD",
+    body?: string,
+): Promise<{ status: number; contentType: string; bodyText: string }> {
+    const response = await fetchImpl({
+        url,
+        method,
         body,
-    ) as {
+        read: method === "HEAD" ? "none" : "text",
+    });
+    if (response.networkError || response.status === 0) {
+        throw new OfficialRetryError(response.networkError || "没有 HTTP 状态");
+    }
+    return {
+        status: response.status,
+        contentType: response.contentType,
+        bodyText: response.bodyText ?? "",
+    };
+}
+
+function stopIfAccess(status: number, contentType: string): void {
+    if (isAccessControl(status, contentType)) {
+        throw new OfficialStopError(accessStopMessage(status || 403));
+    }
+}
+
+export const readProjectInfo = async (
+    fetchImpl: OfficialFetch,
+    id: string,
+): Promise<ProjectInfo> => {
+    const response = await readOfficialText(
+        fetchImpl,
+        `${host}/api/baseQuery/conclusionProjectInfo/${encodeURIComponent(id)}`,
+        "POST",
+    );
+    stopIfAccess(response.status, response.contentType);
+    let data: {
         data?: {
             projectName?: string;
             projectAdmin?: string;
@@ -115,8 +60,17 @@ export const getProjectInfo = async (id: string): Promise<ProjectInfo> => {
             projectKeywordC?: string;
         };
     };
-    if (!response.ok) {
-        throw new Error(`项目信息请求失败 HTTP ${response.status}`);
+    try {
+        data = parseUpstreamJson(
+            response.status,
+            response.contentType,
+            response.bodyText,
+        ) as typeof data;
+    } catch (error) {
+        throw new OfficialRetryError((error as Error).message);
+    }
+    if (response.status !== 200) {
+        throw new OfficialRetryError(`项目信息 HTTP ${response.status}`);
     }
     return {
         projectName: data?.data?.projectName ?? "projectName",
@@ -124,5 +78,106 @@ export const getProjectInfo = async (id: string): Promise<ProjectInfo> => {
             (data?.data?.dependUnit ?? ""),
         conclusionAbstract: data?.data?.conclusionAbstract ?? "",
         projectKeywordC: data?.data?.projectKeywordC ?? "",
+    };
+};
+
+export type ReportPage =
+    | { kind: "missing" }
+    | { kind: "page"; image: ImgResultType };
+
+/**
+ * 先向官网要这一页的地址，再在官同源上确认它是否存在，然后只从官网取字节。
+ * HTTP 404 才是缺页。其他失败不会被当成最后一页。
+ */
+export const readReportPage = async (
+    fetchImpl: OfficialFetch,
+    id: string,
+    index: number,
+): Promise<ReportPage> => {
+    const listed = await readOfficialText(
+        fetchImpl,
+        `${host}/api/baseQuery/completeProjectReport`,
+        "POST",
+        `id=${encodeURIComponent(id)}&index=${index}`,
+    );
+    stopIfAccess(listed.status, listed.contentType);
+    if (listed.status !== 200) {
+        throw new OfficialRetryError(`页地址 HTTP ${listed.status}`);
+    }
+    let payload: unknown;
+    try {
+        payload = parseUpstreamJson(
+            listed.status,
+            listed.contentType,
+            listed.bodyText,
+        );
+    } catch (error) {
+        throw new OfficialRetryError((error as Error).message);
+    }
+    let imagePath: string;
+    try {
+        imagePath = readImagePath(payload, listed.status);
+    } catch (error) {
+        throw new OfficialRetryError((error as Error).message);
+    }
+    const imageUrl = resolveOfficialUrl(imagePath);
+
+    const probe = await fetchImpl({
+        url: imageUrl,
+        method: "HEAD",
+        read: "none",
+    });
+    const decision = classifyImageProbe(
+        probe.status,
+        probe.contentType,
+        probe.networkError,
+    );
+    const headUnsupported = probe.status === 405 || probe.status === 501;
+    if (decision.kind === "missing") return { kind: "missing" };
+    if (decision.kind === "access") {
+        throw new OfficialStopError(accessStopMessage(probe.status || 403));
+    }
+    if (decision.kind === "retryable" && !headUnsupported) {
+        throw new OfficialRetryError(
+            probe.networkError || `图片探测 HTTP ${probe.status}`,
+        );
+    }
+
+    const image = await fetchImpl({
+        url: imageUrl,
+        method: "GET",
+        read: "bytes",
+    });
+    const imageDecision = classifyImageProbe(
+        image.status,
+        image.contentType,
+        image.networkError,
+    );
+    if (imageDecision.kind === "missing") return { kind: "missing" };
+    if (imageDecision.kind === "access") {
+        throw new OfficialStopError(accessStopMessage(image.status || 403));
+    }
+    if (imageDecision.kind !== "page" || !image.bytes || image.bytes.byteLength === 0) {
+        throw new OfficialRetryError(
+            image.networkError || `图片正文 HTTP ${image.status}`,
+        );
+    }
+    const kind = (image.contentType || "").split(";")[0].trim().toLowerCase();
+    if (kind && !kind.startsWith("image/") && kind !== "application/octet-stream") {
+        throw new OfficialRetryError(`图片内容类型 ${kind}`);
+    }
+    const size = imageDimensionsFromData(image.bytes);
+    if (!size?.width || !size?.height) {
+        throw new OfficialRetryError("官网返回的内容无法解析为图片");
+    }
+    return {
+        kind: "page",
+        image: {
+            index,
+            imageData: image.bytes,
+            width: size.width,
+            height: size.height,
+            orientation: size.width < size.height ? "p" : "l",
+        },
     };
 };

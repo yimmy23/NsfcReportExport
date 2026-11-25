@@ -1,26 +1,26 @@
-import { AsyncPool } from "./async-pool/async-pool";
-import { TaskItem } from "./async-pool/type";
 import { sleep } from "./async-pool/utils";
-import { ImgResultType, ProjectInfo } from "./types";
-import {
-  checkCache,
-  getCachedData,
-  getset,
-  pageToast,
-  setCachedData,
-  show,
-} from "./utils";
-import { getImgBlob, getImgURL, getProjectInfo } from "./nsfc";
+import { ImgResultType } from "./types";
+import { checkCache, pageToast, show } from "./utils";
+import { readProjectInfo, readReportPage } from "./nsfc";
 import { projectImg2pdf } from "./pdf-build";
-import { shouldRetryImageTask, shouldStopRetrying } from "./report-check";
+import { shouldStopRetrying } from "./report-check";
+import { fetchFromOpenTab } from "./page-session";
+import {
+  EXTENSION_VERSION,
+  ExportPageRecord,
+  PAGE_INTERVAL_MS,
+  buildExportManifest,
+  isFinalDetailsUrl,
+  isOfficialStop,
+  manifestFilename,
+  notLastPageMessage,
+  sha256Hex,
+} from "./official-page";
 
 let downloading = false;
-// 标签页id，用于发送页内通知
 let tabId: number = 0;
 
-// 初始化，增加右键菜单项
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("onInstalled");
   chrome.contextMenus.create({
     type: "normal",
     id: "@ejfkdev/NsfcReportExportContextMenus",
@@ -30,268 +30,173 @@ chrome.runtime.onInstalled.addListener(() => {
   checkCache();
 });
 
-// 右键菜单下载
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  switch (info.menuItemId) {
-    case "@ejfkdev/NsfcReportExportContextMenus":
-      setTask(tab);
+  if (info.menuItemId === "@ejfkdev/NsfcReportExportContextMenus") {
+    void setTask(tab);
   }
 });
 
-// 插件小图标下载
 chrome.action.onClicked.addListener((tab) => {
-  setTask(tab);
+  void setTask(tab);
 });
 
-chrome.runtime.onMessageExternal.addListener(
-  (data: any, sender: chrome.runtime.MessageSender) => {
-    if (!Array.isArray(data) || data.length != 2) return;
-    console.log("sw.js onMessage get message:", data);
-    console.log("sw.js onMessage get sender:", sender);
-    ReportExport(data[0]);
-    return true;
-  },
-);
-
-// 创建名为 "checkCache" 的定时任务，每 10080 分钟（7 天）运行一次，清理缓存
 chrome.alarms.create("checkCache", {
   periodInMinutes: 60 * 24 * 7,
 });
 
-// 监听定时任务事件
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "checkCache") {
     checkCache();
   }
 });
 
-/**
- * 设置下载任务
- * @param tab - Chrome标签页对象
- * @description
- * 1. 从URL中获取项目ID
- * 2. 设置下载状态和徽标
- * 3. 执行报告导出
- * 4. 处理错误和清理工作
- */
+const logLine = (fields: Record<string, unknown>) => {
+  console.info(`NsfcReportExport/${EXTENSION_VERSION}`, JSON.stringify(fields));
+};
+
 const setTask = async (tab?: chrome.tabs.Tab) => {
-  // 检查标签页是否有效
   if (!tab?.url || !tab?.id) return;
-
-  // 从URL中解析项目ID
-  const url = new URL(tab.url);
-  const id = url.searchParams.get("id");
-
-  // 检查ID是否存在且当前没有下载任务在进行
+  if (!isFinalDetailsUrl(tab.url)) {
+    show(
+      tab.id,
+      "导出失败",
+      "请先打开官网结题详情页 https://kd.nsfc.cn/finalDetails 并完成官网验证，再点扩展。未生成PDF。",
+    );
+    return;
+  }
+  const id = new URL(tab.url).searchParams.get("id");
   if (id == null || downloading) return;
 
-  // 设置下载状态为true
   downloading = true;
-  console.log("setTask", id);
-
-  // 保存当前标签页ID
   tabId = tab.id;
-
-  // 绘制进度条提示框
+  logLine({ phase: "start", version: EXTENSION_VERSION });
   chrome.scripting.executeScript({
     target: { tabId },
     func: pageToast,
   });
-
-  // 显示下载中徽标
   await chrome.action.setBadgeText({ text: "⏬" });
 
   try {
-    // 执行报告导出
-    await ReportExport(id);
-  } catch (e: any) {
-    // 错误处理：记录错误并显示失败提示
-    console.log((e as Error).name, (e as Error).message);
-    show(
-      tabId,
-      "导出失败",
-      "导出失败，重新下载多试几次  " + (e as Error).message,
-    );
+    await ReportExport(id, tab.url);
+  } catch (error) {
+    const message = (error as Error).message;
+    logLine({ phase: "fail", message });
+    show(tabId, "导出失败", message);
   }
 
-  // 清理工作：重置状态
   downloading = false;
   tabId = 0;
-
-  // 清除徽标
   await chrome.action.setBadgeText({ text: "" });
-
-  // 检查并清理缓存
   checkCache();
 };
 
-/**
- * 导出项目报告为PDF文件
- * @param id - 项目ID
- */
-const ReportExport = async (
-  id: string,
-) => {
-  // 记录开始时间,用于计算总耗时
-  console.log("ReportExport", id);
+const ReportExport = async (id: string, sourcePage: string) => {
   const startTime = Date.now();
-
-  // 获取项目基本信息
-  const info = await getProjectInfo(id);
+  const fetchImpl = fetchFromOpenTab(tabId);
+  const info = await readProjectInfo(fetchImpl, id);
   show(tabId, "正在导出", info.projectName);
 
-  // 用于存储所有图片数据的缓存数组
-  let imgCache: ImgResultType[] = [];
-  // 页数递增获取图片，遇到404即为最后一页
-
-  // 当前处理的页码
+  const imgCache: ImgResultType[] = [];
+  const pageRecords: ExportPageRecord[] = [];
   let index = 0;
-
-  // 获取已缓存的最大页数,如果没有缓存则默认为0
-  let [getImgFetchDonePage, setImgFetchDonePage] = getset<number>(parseInt(
-    (await getCachedData(`img_${id}_maxpage`))?.data ?? 0,
-  ));
-
-  const imgPool = getImgPool(imgCache, info);
+  let terminalIndex = 0;
   let consecutiveErrors = 0;
 
-  // 循环添加图片获取任务,直到遇到404
   while (++index) {
-    console.log(index);
-    // 如果已知最大页数,且当前页码超过最大页数,则退出循环
-    if (getImgFetchDonePage() > 0 && index >= getImgFetchDonePage()) {
-      break;
-    }
-
     show(tabId, "正在导出", `${info.projectName} 第${index}页`);
     try {
-      const [url, cached] = await getImgURL(id, index);
+      const page = await readReportPage(fetchImpl, id, index);
       consecutiveErrors = 0;
-      if (url === "404") {
-        setImgFetchDonePage(index);
-        // 缓存最大页数，有效期7天
-        setCachedData(`img_${id}_maxpage`, index);
+      if (page.kind === "missing") {
+        terminalIndex = index;
+        logLine({ phase: "end", terminalIndex });
         break;
       }
-      imgPool.add({
-        worker: getImgBlob,
-        args: [url, index],
+      imgCache.push(page.image);
+      pageRecords.push({
+        index,
+        byteLength: page.image.imageData.byteLength,
+        sha256: await sha256Hex(page.image.imageData),
+        width: page.image.width,
+        height: page.image.height,
       });
-      if (!cached) {
-        await sleep(1000);
-      }
+      logLine({
+        phase: "page",
+        index,
+        bytes: page.image.imageData.byteLength,
+        sha256: pageRecords[pageRecords.length - 1].sha256,
+      });
+      await sleep(PAGE_INTERVAL_MS);
     } catch (error) {
+      if (isOfficialStop(error)) throw error;
       consecutiveErrors++;
+      logLine({
+        phase: "retry",
+        index,
+        consecutiveErrors,
+        detail: (error as Error).message,
+      });
       if (shouldStopRetrying(consecutiveErrors)) {
-        throw error;
+        throw new Error(notLastPageMessage(index, (error as Error).message));
       }
       index--;
       await sleep(3000);
     }
   }
 
-  await waitForImageTasks(imgPool);
-
-  // 开始生成PDF文件。页不齐时 projectImg2pdf 会抛错，不写文件。
   show(tabId, "生成文件", `${info.projectName}.pdf 生成中`);
-
-  const [filename, pdfUrl] = projectImg2pdf(
-    info,
-    imgCache,
-    getImgFetchDonePage(),
-  );
-  const pageCount = imgCache.length;
-  const elapsedMinutes = Math.ceil((Date.now() - startTime) / 1000 / 60);
+  const [filename, pdfUrl] = projectImg2pdf(info, imgCache, terminalIndex);
+  const manifest = buildExportManifest({
+    sourcePage,
+    projectName: info.projectName,
+    projectAdmin: info.projectAdmin,
+    conclusionAbstract: info.conclusionAbstract,
+    projectKeywordC: info.projectKeywordC,
+    terminalIndex,
+    pages: pageRecords,
+    exportedAt: new Date().toISOString(),
+  });
+  const manifestUrl = "data:application/json;charset=utf-8," +
+    encodeURIComponent(JSON.stringify(manifest, null, 2));
   const pageTabId = tabId;
-
-  chrome.downloads.download(
-    {
-      url: pdfUrl,
-      filename: filename,
-      conflictAction: "uniquify",
-      saveAs: false,
-    },
-    function (downloadId) {
-      const downloadError = readDownloadError();
-      if (downloadError || downloadId == null) {
-        show(
-          pageTabId,
-          "导出失败",
-          downloadError || "浏览器未开始下载",
-        );
-        return;
-      }
-      console.log(`文件下载，ID: ${downloadId}`);
-      show(
-        pageTabId,
-        "导出完成",
-        `${filename}保存在浏览器默认下载目录 共${pageCount}页 用时${elapsedMinutes}分钟`,
-      );
-    },
+  const pdfId = await downloadData(pdfUrl, filename);
+  const manifestId = await downloadData(manifestUrl, manifestFilename(info.projectName));
+  const elapsedMinutes = Math.ceil((Date.now() - startTime) / 1000 / 60);
+  logLine({
+    phase: "saved",
+    pages: imgCache.length,
+    pdfId,
+    manifestId,
+  });
+  show(
+    pageTabId,
+    "导出完成",
+    `${filename} 与清单已在浏览器默认下载目录。共${imgCache.length}页，用时${elapsedMinutes}分钟。清单里 thirdPartyImageProxy 应为 false。`,
   );
-
-  // 清理过期缓存
-  checkCache();
 };
 
-/** chrome-types 已不再声明回调式 lastError，运行时仍会在下载失败时设置它。 */
 const readDownloadError = (): string | undefined => {
   const runtime = chrome.runtime as { lastError?: { message?: string } };
   return runtime.lastError?.message;
 };
 
-const waitForImageTasks = async (
-  pool: {
-    queueLength: number;
-    delayTaskCount: number;
-    events: { parallelZero?: Promise<unknown> };
-    tobeBreak: () => void;
-  },
-) => {
-  for (;;) {
-    if (pool.queueLength === 0 && pool.delayTaskCount === 0) {
-      await pool.events.parallelZero;
-      if (pool.queueLength === 0 && pool.delayTaskCount === 0) {
-        pool.tobeBreak();
-        return;
-      }
-    }
-    await sleep(20);
-  }
-};
-
-const getImgPool = (
-  imgCache: ImgResultType[],
-  info: ProjectInfo,
-) => {
-  // 创建异步任务池，配置并行数、重试策略等
-  const pool = new AsyncPool<[string, number], ImgResultType>({
-    parallel: 8, // 最大并行任务数
-    autoRetry: false, // 禁用自动重试
-    autoRun: true, // 启用自动运行
-    retryCount: 50, // 最大重试次数
-    retryDelay: 0, // 重试延迟时间(ms)
-    waitTime: 5000,
+const downloadData = (url: string, filename: string): Promise<number> => {
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download(
+      {
+        url,
+        filename,
+        conflictAction: "uniquify",
+        saveAs: false,
+      },
+      (downloadId) => {
+        const downloadError = readDownloadError();
+        if (downloadError || downloadId == null) {
+          reject(new Error(downloadError || `浏览器未开始下载 ${filename}`));
+          return;
+        }
+        resolve(downloadId);
+      },
+    );
   });
-
-  // 单个任务完成时的回调处理
-  pool.callbacks.oneTaskDone = (
-    result: ImgResultType,
-    _error: Error,
-    task: TaskItem<[string, number]>,
-  ) => {
-    if (result) {
-      result.index = task.args![1];
-      imgCache.push(result);
-      show(tabId, "正在导出", `${info.projectName} 第${result.index}页图片`);
-    }
-    if (_error && shouldRetryImageTask(task.ctx?.retryCount)) {
-      task.ctx?.retry?.();
-    }
-  };
-  return pool;
 };
-
-// https://kd.nsfc.cn/finalDetails?id=18762a8003cdc2a63d65957925f6c67d
-// ReportExport('18762a8003cdc2a63d65957925f6c67d');
-// https://kd.nsfc.cn/finalDetails?id=161cd5723f90c0d39423fb838e32f809
